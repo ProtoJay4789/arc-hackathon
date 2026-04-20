@@ -8,8 +8,9 @@ optimizer = true
 optimizer_runs = 200
 
 [rpc_endpoints]
+arc_testnet = "https://rpc.testnet.arc.network"
 avalanche_fuji = "https://api.avax-test.network/ext/bc/C/rpc"
 base_sepolia = "https://sepolia.base.org"
 
 [etherscan]
-avalanche_fuji = { key = "${SNOWTRACE_API_KEY}", url = "https://api.routescan.io/v2/network/testnet/evm/43113/etherscan" }
+arc_testnet = { key = "", url = "" }
