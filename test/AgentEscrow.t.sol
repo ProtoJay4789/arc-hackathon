@@ -13,14 +13,19 @@ contract AgentEscrowTest is Test {
     MockUSDC public usdc;
     
     address public owner = makeAddr("owner");
-    address public validator = makeAddr("validator");
-    address public buyer = makeAddr("buyer");
     address public seller = makeAddr("seller");
+    uint256 public validatorKey;
+    address public validator;
+    uint256 public buyerKey;
+    address public buyer;
     
     uint256 constant ESCROW_AMOUNT = 100 * 10**6; // 100 USDC (6 decimals)
-    uint256 constant USDC_DECIMALS = 6;
     
     function setUp() public {
+        // Create addresses with keys for signing
+        (validator, validatorKey) = makeAddrAndKey("validator");
+        (buyer, buyerKey) = makeAddrAndKey("buyer");
+        
         // Deploy mock USDC
         vm.startPrank(owner);
         usdc = new MockUSDC();
@@ -85,7 +90,7 @@ contract AgentEscrowTest is Test {
         bytes32 hash = escrow.hashValidation(escrowId, timestamp);
         
         // Sign with validator's private key
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(validator, hash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(validatorKey, hash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // Validate with signature
@@ -219,14 +224,14 @@ contract AgentEscrowTest is Test {
         // Create signature
         uint256 timestamp = block.timestamp;
         bytes32 hash = escrow.hashValidation(escrowId, timestamp);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(validator, hash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(validatorKey, hash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // First use succeeds
         escrow.validateWithSignature(escrowId, timestamp, signature);
         
-        // Second use fails (replay protection)
-        vm.expectRevert(AgentEscrow.InvalidSignature.selector);
+        // Second use fails — escrow already validated (state check hits first)
+        vm.expectRevert(AgentEscrow.EscrowAlreadyValidated.selector);
         escrow.validateWithSignature(escrowId, timestamp, signature);
     }
     
@@ -238,7 +243,7 @@ contract AgentEscrowTest is Test {
         // Sign with wrong key (buyer instead of validator)
         uint256 timestamp = block.timestamp;
         bytes32 hash = escrow.hashValidation(escrowId, timestamp);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(buyer, hash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(buyerKey, hash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // Should fail

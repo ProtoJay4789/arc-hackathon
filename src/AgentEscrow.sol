@@ -100,7 +100,8 @@ contract AgentEscrow is EIP712 {
         if (_amount == 0) revert ZeroAmount();
         
         // Transfer USDC from buyer to contract
-        usdc.transferFrom(msg.sender, address(this), _amount);
+        bool success = usdc.transferFrom(msg.sender, address(this), _amount);
+        if (!success) revert TransferFailed();
         
         uint256 escrowId = _nextEscrowId++;
         
@@ -131,8 +132,8 @@ contract AgentEscrow is EIP712 {
         Escrow storage escrow = escrows[_escrowId];
         
         if (escrow.id == 0) revert EscrowNotFound();
-        if (escrow.status != EscrowStatus.Created) revert EscrowAlreadyCompleted();
         if (escrow.validated) revert EscrowAlreadyValidated();
+        if (escrow.status != EscrowStatus.Created) revert EscrowAlreadyCompleted();
         
         escrow.validated = true;
         escrow.status = EscrowStatus.Validated;
@@ -155,8 +156,8 @@ contract AgentEscrow is EIP712 {
         Escrow storage escrow = escrows[_escrowId];
         
         if (escrow.id == 0) revert EscrowNotFound();
-        if (escrow.status != EscrowStatus.Created) revert EscrowAlreadyCompleted();
         if (escrow.validated) revert EscrowAlreadyValidated();
+        if (escrow.status != EscrowStatus.Created) revert EscrowAlreadyCompleted();
         
         // Reconstruct the digest
         bytes32 structHash = keccak256(
@@ -293,7 +294,8 @@ contract AgentEscrow is EIP712 {
      * @param _amount Amount to deposit
      */
     function depositFunds(uint256 _amount) external onlyOwner {
-        usdc.transferFrom(msg.sender, address(this), _amount);
+        bool success = usdc.transferFrom(msg.sender, address(this), _amount);
+        if (!success) revert TransferFailed();
         emit FundsDeposited(msg.sender, _amount);
     }
 
