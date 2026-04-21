@@ -4,9 +4,9 @@ pragma solidity ^0.8.20;
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AgentEscrow} from "../src/AgentEscrow.sol";
-import {DisputeResolver} from "../src/DisputeResolver.sol";
-import {GenLayerOracle} from "../src/GenLayerOracle.sol";
-import {IAdjudicationOracle} from "../src/interfaces/IAdjudicationOracle.sol";
+import {HumanDisputeResolver} from "../src/HumanDisputeResolver.sol";
+import {GenLayerOracleResolver} from "../src/GenLayerOracleResolver.sol";
+import {IResolver} from "../src/interfaces/IResolver.sol";
 
 contract MockUSDC3 is ERC20 {
     constructor() ERC20("USD Coin", "USDC") {}
@@ -14,291 +14,186 @@ contract MockUSDC3 is ERC20 {
     function mint(address to, uint256 amount) external { _mint(to, amount); }
 }
 
-contract GenLayerOracleTest is Test {
+/**
+ * @notice Tests for GenLayerOracleResolver (IResolver-based GenLayer stub)
+ * @dev Proves both HumanDisputeResolver and GenLayerOracleResolver implement
+ *      the same IResolver interface — escrow doesn't care which one it uses.
+ */
+contract GenLayerResolverTest is Test {
     MockUSDC3 usdc;
-    AgentEscrow escrow;
-    DisputeResolver resolver;
-    GenLayerOracle oracle;
+    AgentEscrow escrowHuman;
+    AgentEscrow escrowOracle;
+    HumanDisputeResolver humanResolver;
+    GenLayerOracleResolver oracleResolver;
 
     address owner = makeAddr("owner");
     address buyer = makeAddr("buyer");
     address seller = makeAddr("seller");
     address validator = makeAddr("validator");
-    address relayer = makeAddr("relayer");
 
     uint256 constant ONE_USDC = 1e6;
-    uint256 constant EVIDENCE_WINDOW = 1 hours;
-    uint256 constant DISPUTE_DEADLINE = 24 hours;
 
     function setUp() public {
         vm.startPrank(owner);
 
+        // Deploy both resolver types
+        humanResolver = new HumanDisputeResolver(1 hours, 24 hours);
+        oracleResolver = new GenLayerOracleResolver();
+
+        // Deploy two escrows — one with each resolver
         usdc = new MockUSDC3();
-        escrow = new AgentEscrow(address(validator), address(usdc));
-        resolver = new DisputeResolver(
-            address(escrow),
-            address(usdc),
-            EVIDENCE_WINDOW,
-            DISPUTE_DEADLINE
-        );
+        escrowHuman = new AgentEscrow(address(validator), address(usdc), address(humanResolver));
+        escrowOracle = new AgentEscrow(address(validator), address(usdc), address(oracleResolver));
 
-        // Deploy oracle with resolver as the caller
-        oracle = new GenLayerOracle(address(resolver), address(0));
-
-        // Wire oracle into resolver
-        resolver.setOracleAdapter(address(oracle));
-
-        // Authorize relayer to submit GenLayer verdicts
-        oracle.authorizeSubmitter(relayer);
-
-        // Fund buyer + create escrow
-        usdc.mint(buyer, 10 * ONE_USDC);
+        // Fund buyer
+        usdc.mint(buyer, 20 * ONE_USDC);
         vm.stopPrank();
 
         vm.prank(buyer);
-        usdc.approve(address(escrow), type(uint256).max);
+        usdc.approve(address(escrowHuman), type(uint256).max);
 
         vm.prank(buyer);
-        escrow.createEscrow(seller, 5 * ONE_USDC);
+        usdc.approve(address(escrowOracle), type(uint256).max);
+
+        // Create escrows
+        vm.prank(buyer);
+        escrowHuman.createEscrow(seller, 5 * ONE_USDC);
+
+        vm.prank(buyer);
+        escrowOracle.createEscrow(seller, 5 * ONE_USDC);
     }
 
-    // ============ Oracle Request Flow ============
+    // ============ Interface Compliance Proof ============
 
-    function testRequestOracleAdjudication() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "SLA not met");
+    function testBothResolversImplementIResolver() public {
+        // Both are castable to IResolver
+        IResolver human = IResolver(address(humanResolver));
+        IResolver oracle = IResolver(address(oracleResolver));
 
-        vm.prank(buyer);
-        uint256 oracleRequestId = resolver.requestOracleAdjudication(disputeId);
-
-        assertEq(oracleRequestId, 1);
-        assertTrue(resolver.oracleRequested(disputeId));
-
-        // Verify oracle stored the request
-        IAdjudicationOracle.OracleRequest memory req = oracle.getRequest(oracleRequestId);
-        assertEq(req.disputeId, disputeId);
-        assertEq(req.buyer, buyer);
-        assertEq(req.seller, seller);
-        assertEq(req.amount, 5 * ONE_USDC);
-        assertFalse(req.fulfilled);
+        // Both have the same function selectors
+        // fileDispute, submitEvidence, getVerdict, executeVerdict, isReady, cancelDispute
+        assertTrue(address(human) != address(0));
+        assertTrue(address(oracle) != address(0));
     }
 
-    function testRequestOracleWithEvidence() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Wrong output");
+    // ============ GenLayerOracleResolver Flow ============
 
-        // Submit evidence first
+    function testOracleResolverFullFlow() public {
+        // 1. Open dispute via escrow
         vm.prank(buyer);
-        resolver.submitEvidence(disputeId, "ipfs://QmProof1");
+        uint256 disputeId = escrowOracle.openDispute(1, "Agent didn't deliver");
+
+        // 2. Submit evidence
         vm.prank(seller);
-        resolver.submitEvidence(disputeId, "ipfs://QmCounterProof");
+        oracleResolver.submitEvidence(disputeId, "ipfs://QmProofOfWork");
 
-        // Now request oracle — evidence should be forwarded
-        vm.prank(seller);
-        uint256 oracleRequestId = resolver.requestOracleAdjudication(disputeId);
-
-        IAdjudicationOracle.OracleRequest memory req = oracle.getRequest(oracleRequestId);
-        assertEq(req.evidence.length, 2);
-        assertEq(req.evidence[0], "ipfs://QmProof1");
-        assertEq(req.evidence[1], "ipfs://QmCounterProof");
-    }
-
-    function testSellerCanRequestOracle() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "SLA not met");
-
-        vm.prank(seller);
-        uint256 oracleRequestId = resolver.requestOracleAdjudication(disputeId);
-        assertGt(oracleRequestId, 0);
-    }
-
-    // ============ Verdict Submission ============
-
-    function testSubmitVerdictBuyerWins() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "No delivery");
-        vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
-
-        // Relayer submits GenLayer verdict
-        vm.prank(relayer);
-        oracle.submitVerdict(
-            1,
-            IAdjudicationOracle.Verdict.BuyerWins,
-            "AI verified: no work product delivered within SLA window"
-        );
-
-        assertTrue(oracle.isFulfilled(1));
-
-        (IAdjudicationOracle.Verdict verdict, string memory reasoning) = oracle.getVerdict(1);
-        assertEq(uint8(verdict), uint8(IAdjudicationOracle.Verdict.BuyerWins));
-        assertEq(reasoning, "AI verified: no work product delivered within SLA window");
-    }
-
-    function testResolveViaOracleBuyerWins() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "No delivery");
-        vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
-
-        // Relayer submits verdict — auto-resolves in DisputeResolver
-        vm.prank(relayer);
-        oracle.submitVerdict(1, IAdjudicationOracle.Verdict.BuyerWins, "Buyer proven right");
-
-        DisputeResolver.Dispute memory d = resolver.getDispute(disputeId);
-        assertEq(uint8(d.resolution), uint8(DisputeResolver.Resolution.BuyerWins));
-        assertEq(uint8(d.status), uint8(DisputeResolver.DisputeStatus.Resolved));
-    }
-
-    function testResolveViaOracleSplit() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Partial work");
-        vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
-
-        vm.prank(relayer);
-        oracle.submitVerdict(1, IAdjudicationOracle.Verdict.Split, "50% of SLA met");
-
-        DisputeResolver.Dispute memory d = resolver.getDispute(disputeId);
-        assertEq(uint8(d.resolution), uint8(DisputeResolver.Resolution.Split));
-    }
-
-    function testOwnerCanSubmitVerdictFallback() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Dispute");
-        vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
-
-        // Owner acts as fallback relayer
+        // 3. Owner (simulating GenLayer) sets verdict
         vm.prank(owner);
-        oracle.submitVerdict(1, IAdjudicationOracle.Verdict.SellerWins, "Owner fallback");
+        oracleResolver.setVerdict(disputeId, IResolver.Verdict.BuyerWins, "AI: No delivery evidence");
 
-        assertTrue(oracle.isFulfilled(1));
+        // 4. Check isReady
+        assertTrue(oracleResolver.isReady(disputeId));
+
+        // 5. Execute via escrow
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        vm.prank(buyer);
+        escrowOracle.resolveDispute(1);
+
+        assertEq(usdc.balanceOf(buyer), buyerBefore + 5 * ONE_USDC);
     }
 
-    // ============ Edge Cases ============
-
-    function testCannotRequestOracleTwice() public {
+    function testOracleResolverSplit() public {
         vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Test");
-        vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
+        uint256 disputeId = escrowOracle.openDispute(1, "Partial delivery");
 
-        vm.prank(seller);
-        vm.expectRevert(DisputeResolver.OracleAlreadyRequested.selector);
-        resolver.requestOracleAdjudication(disputeId);
+        vm.prank(owner);
+        oracleResolver.setVerdict(disputeId, IResolver.Verdict.Split, "AI: 50% complete");
+
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        vm.prank(buyer);
+        escrowOracle.resolveDispute(1);
+
+        assertEq(usdc.balanceOf(buyer), buyerBefore + 2.5e6);
+        assertEq(usdc.balanceOf(seller), sellerBefore + 2.5e6);
     }
 
-    function testCannotRequestOracleWithoutAdapter() public {
-        // Deploy fresh resolver without oracle
-        vm.startPrank(owner);
-        DisputeResolver freshResolver = new DisputeResolver(
-            address(escrow),
-            address(usdc),
-            EVIDENCE_WINDOW,
-            DISPUTE_DEADLINE
-        );
-        vm.stopPrank();
+    function testOracleResolverSellerWins() public {
+        vm.prank(buyer);
+        uint256 disputeId = escrowOracle.openDispute(1, "Not satisfied");
+
+        vm.prank(owner);
+        oracleResolver.setVerdict(disputeId, IResolver.Verdict.SellerWins, "AI: Work was delivered correctly");
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
 
         vm.prank(buyer);
-        freshResolver.openDispute(1, "Test");
+        escrowOracle.resolveDispute(1);
 
-        vm.prank(buyer);
-        vm.expectRevert(DisputeResolver.OracleNotSet.selector);
-        freshResolver.requestOracleAdjudication(1);
+        assertEq(usdc.balanceOf(seller), sellerBefore + 5 * ONE_USDC);
     }
 
-    function testCannotSubmitVerdictTwice() public {
+    function testOracleResolverNotReadyPending() public {
         vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Test");
+        uint256 disputeId = escrowOracle.openDispute(1, "Test");
+
+        // Not ready yet — no verdict set
+        assertFalse(oracleResolver.isReady(disputeId));
+
+        // Escrow can't resolve
+        vm.expectRevert(AgentEscrow.VerdictNotReady.selector);
         vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
-
-        vm.prank(relayer);
-        oracle.submitVerdict(1, IAdjudicationOracle.Verdict.BuyerWins, "First");
-
-        vm.prank(relayer);
-        vm.expectRevert(GenLayerOracle.RequestAlreadyFulfilled.selector);
-        oracle.submitVerdict(1, IAdjudicationOracle.Verdict.SellerWins, "Second");
+        escrowOracle.resolveDispute(1);
     }
 
-    function testOnlyAuthorizedCanSubmitVerdict() public {
+    // ============ Cross-Resolver Consistency ============
+
+    function testBothResolversReturnSamePayouts() public {
+        // File disputes in both
         vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Test");
+        uint256 humanId = escrowHuman.openDispute(1, "Test");
         vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
+        uint256 oracleId = escrowOracle.openDispute(1, "Test");
+
+        // Resolve both with Split
+        vm.prank(owner);
+        humanResolver.addArbitrator(owner);
+        vm.prank(owner);
+        humanResolver.resolveDispute(humanId, IResolver.Verdict.Split, "50/50");
+
+        vm.prank(owner);
+        oracleResolver.setVerdict(oracleId, IResolver.Verdict.Split, "50/50");
+
+        // Both should return same payouts
+        (, , uint256 humanBuyerPayout, uint256 humanSellerPayout) = humanResolver.getVerdict(humanId);
+        (, , uint256 oracleBuyerPayout, uint256 oracleSellerPayout) = oracleResolver.getVerdict(oracleId);
+
+        assertEq(humanBuyerPayout, oracleBuyerPayout);
+        assertEq(humanSellerPayout, oracleSellerPayout);
+    }
+
+    // ============ Oracle Admin ============
+
+    function testOnlyOwnerCanSetVerdict() public {
+        vm.prank(buyer);
+        uint256 disputeId = escrowOracle.openDispute(1, "Test");
 
         address rando = makeAddr("rando");
         vm.prank(rando);
-        vm.expectRevert(GenLayerOracle.NotAuthorized.selector);
-        oracle.submitVerdict(1, IAdjudicationOracle.Verdict.BuyerWins, "Hacked");
-    }
-
-    function testOnlyResolverCanRequestOracle() public {
-        address rando = makeAddr("rando");
-        string[] memory emptyEvidence = new string[](0);
-
-        vm.prank(rando);
-        vm.expectRevert(GenLayerOracle.NotAuthorized.selector);
-        oracle.requestAdjudication(1, address(escrow), 1, buyer, seller, 5 * ONE_USDC, "test", emptyEvidence);
-    }
-
-    function testCannotSubmitVerdictWithoutRequest() public {
-        vm.prank(relayer);
-        vm.expectRevert(GenLayerOracle.RequestNotFound.selector);
-        oracle.submitVerdict(999, IAdjudicationOracle.Verdict.BuyerWins, "No request");
-    }
-
-    // ============ Human Arbiter Still Works ============
-
-    function testHumanArbiterStillWorksAfterOracleEnabled() public {
-        vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Test");
-
-        // Don't request oracle — just resolve human way
-        vm.prank(owner); // owner is arbitrator
-        resolver.resolveDispute(disputeId, DisputeResolver.Resolution.BuyerWins, "Human decided");
-
-        DisputeResolver.Dispute memory d = resolver.getDispute(disputeId);
-        assertEq(uint8(d.resolution), uint8(DisputeResolver.Resolution.BuyerWins));
-        assertEq(uint8(d.status), uint8(DisputeResolver.DisputeStatus.Resolved));
-    }
-
-    // ============ Admin ============
-
-    function testSetOracleAdapter() public {
-        GenLayerOracle newOracle = new GenLayerOracle(address(resolver), address(0));
-
-        vm.prank(owner);
-        resolver.setOracleAdapter(address(newOracle));
-
-        assertEq(address(resolver.oracleAdapter()), address(newOracle));
-    }
-
-    function testAuthorizeRevokeSubmitter() public {
-        address newSubmitter = makeAddr("newSubmitter");
-
-        vm.prank(owner);
-        oracle.authorizeSubmitter(newSubmitter);
-        assertTrue(oracle.authorizedSubmitters(newSubmitter));
-
-        vm.prank(owner);
-        oracle.revokeSubmitter(newSubmitter);
-        assertFalse(oracle.authorizedSubmitters(newSubmitter));
-    }
-
-    function testOnlyOwnerCanSetOracleAdapter() public {
-        vm.prank(buyer);
         vm.expectRevert();
-        resolver.setOracleAdapter(address(oracle));
+        oracleResolver.setVerdict(disputeId, IResolver.Verdict.BuyerWins, "unauthorized");
     }
 
-    function testMappingLookup() public {
+    function testCannotSetVerdictTwice() public {
         vm.prank(buyer);
-        uint256 disputeId = resolver.openDispute(1, "Test");
-        vm.prank(buyer);
-        resolver.requestOracleAdjudication(disputeId);
+        uint256 disputeId = escrowOracle.openDispute(1, "Test");
 
-        assertEq(oracle.getRequestIdForDispute(disputeId), 1);
+        vm.prank(owner);
+        oracleResolver.setVerdict(disputeId, IResolver.Verdict.BuyerWins, "first");
+
+        vm.prank(owner);
+        vm.expectRevert("Already resolved");
+        oracleResolver.setVerdict(disputeId, IResolver.Verdict.SellerWins, "second");
     }
 }

@@ -4,12 +4,13 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 import "../src/AgentEscrow.sol";
 import "../src/X402PaymentHandler.sol";
-import "../src/DisputeResolver.sol";
-import "../src/GenLayerOracle.sol";
+import "../src/HumanDisputeResolver.sol";
+import "../src/GenLayerOracleResolver.sol";
+import "../src/interfaces/IResolver.sol";
 
 /**
  * @title Deploy Full Stack to Arc Testnet
- * @notice Deploys AgentEscrow + X402PaymentHandler + DisputeResolver
+ * @notice Deploys AgentEscrow + X402PaymentHandler + HumanDisputeResolver + GenLayerOracleResolver
  *         for the "Agentic Economy on Arc" hackathon
  *
  * Usage:
@@ -33,33 +34,25 @@ contract DeployArcHackathon is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // 1. Deploy AgentEscrow (core escrow)
-        AgentEscrow escrow = new AgentEscrow(aiValidator, usdcAddress);
+        // 1. Deploy HumanDisputeResolver (Tier 1 — human arbitration)
+        HumanDisputeResolver humanResolver = new HumanDisputeResolver(
+            evidenceWindow,
+            disputeDeadline
+        );
 
-        // 2. Deploy X402PaymentHandler (x402 settlement + service registry)
+        // 2. Deploy GenLayerOracleResolver (Tier 2 — AI oracle, stub for demo)
+        GenLayerOracleResolver oracleResolver = new GenLayerOracleResolver();
+
+        // 3. Deploy AgentEscrow with human resolver as default
+        AgentEscrow escrow = new AgentEscrow(aiValidator, usdcAddress, address(humanResolver));
+
+        // 4. Deploy X402PaymentHandler (x402 settlement + service registry)
         X402PaymentHandler paymentHandler = new X402PaymentHandler(
             usdcAddress,
             facilitator,
             address(escrow),
             platformFeeBps
         );
-
-        // 3. Deploy DisputeResolver (arbitration layer)
-        DisputeResolver disputeResolver = new DisputeResolver(
-            address(escrow),
-            usdcAddress,
-            evidenceWindow,
-            disputeDeadline
-        );
-
-        // 4. Deploy GenLayerOracle (AI dispute adapter)
-        GenLayerOracle genLayerOracle = new GenLayerOracle(
-            address(disputeResolver),
-            address(0) // GenLayer gateway TBD
-        );
-
-        // Wire oracle into resolver
-        disputeResolver.setOracleAdapter(address(genLayerOracle));
 
         vm.stopBroadcast();
 
@@ -68,10 +61,10 @@ contract DeployArcHackathon is Script {
         console.log("  Arc Hackathon - Full Stack Deployment  ");
         console.log("========================================");
         console.log("");
-        console.log("AgentEscrow:        ", address(escrow));
-        console.log("X402PaymentHandler: ", address(paymentHandler));
-        console.log("DisputeResolver:    ", address(disputeResolver));
-        console.log("GenLayerOracle:     ", address(genLayerOracle));
+        console.log("AgentEscrow:             ", address(escrow));
+        console.log("X402PaymentHandler:      ", address(paymentHandler));
+        console.log("HumanDisputeResolver:    ", address(humanResolver));
+        console.log("GenLayerOracleResolver:  ", address(oracleResolver));
         console.log("");
         console.log("--- Configuration ---");
         console.log("USDC:               ", usdcAddress);
@@ -83,10 +76,16 @@ contract DeployArcHackathon is Script {
         console.log("Owner:              ", deployer);
         console.log("Chain ID:           ", uint256(5042002));
         console.log("");
+        console.log("--- Two-Tier Architecture ---");
+        console.log("Tier 1: Human arbitration (default)");
+        console.log("Tier 2: GenLayer AI oracle (opt-in escalation)");
+        console.log("Both implement IResolver -- escrow doesn't care which.");
+        console.log("");
         console.log("--- Explorer Links ---");
         console.log("AgentEscrow:        https://testnet.arcscan.app/address/", address(escrow));
         console.log("PaymentHandler:     https://testnet.arcscan.app/address/", address(paymentHandler));
-        console.log("DisputeResolver:    https://testnet.arcscan.app/address/", address(disputeResolver));
+        console.log("HumanResolver:      https://testnet.arcscan.app/address/", address(humanResolver));
+        console.log("GenLayerResolver:   https://testnet.arcscan.app/address/", address(oracleResolver));
         console.log("========================================");
     }
 }

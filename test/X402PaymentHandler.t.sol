@@ -72,7 +72,7 @@ contract X402PaymentHandlerTest is Test {
         vm.startPrank(owner);
 
         usdc = new MockUSDC();
-        escrow = new AgentEscrow(address(validator), address(usdc));
+        escrow = new AgentEscrow(address(validator), address(usdc), address(0));
         handler = new HandlerHarness(
             address(usdc),
             address(facilitator),

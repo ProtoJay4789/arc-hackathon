@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import {IAdjudicationOracle} from "./interfaces/IAdjudicationOracle.sol";
-import {DisputeResolver} from "./DisputeResolver.sol";
 
 /**
  * @title GenLayerOracle
@@ -139,14 +138,8 @@ contract GenLayerOracle is IAdjudicationOracle, ReentrancyGuard, Ownable {
 
         emit VerdictDelivered(_requestId, req.disputeId, _verdict, _reasoning);
 
-        // Auto-resolve in DisputeResolver if it's set
-        if (disputeResolver != address(0)) {
-            DisputeResolver(disputeResolver).resolveDisputeFromOracle(
-                req.disputeId,
-                _verdict,
-                _reasoning
-            );
-        }
+        // Old auto-resolve removed — GenLayerOracleResolver handles this directly now.
+        // Verdict is stored on-chain for offchain relayers to pick up.
     }
 
     // ============ View ============

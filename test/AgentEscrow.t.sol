@@ -31,7 +31,7 @@ contract AgentEscrowTest is Test {
         usdc = new MockUSDC();
         
         // Deploy escrow contract
-        escrow = new AgentEscrow(address(validator), address(usdc));
+        escrow = new AgentEscrow(address(validator), address(usdc), address(0));
         
         // Transfer USDC to buyer for testing
         usdc.transfer(buyer, 10000 * 10**6); // 10K USDC

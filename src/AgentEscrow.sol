@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
+import {IResolver} from "./interfaces/IResolver.sol";
+
 /**
  * @title AgentEscrow
  * @notice AI-validated escrow contract with x402 payment support and USDC
@@ -21,6 +23,8 @@ contract AgentEscrow is EIP712 {
     event ValidatorUpdated(address indexed oldValidator, address indexed newValidator);
     event FundsDeposited(address indexed depositor, uint256 amount);
     event FundsWithdrawn(address indexed recipient, uint256 amount);
+    event DisputeOpened(uint256 indexed escrowId, uint256 indexed disputeId);
+    event DisputeExecuted(uint256 indexed escrowId, uint256 buyerPayout, uint256 sellerPayout);
 
     // ============ Errors ============
     error EscrowNotFound();
@@ -32,13 +36,17 @@ contract AgentEscrow is EIP712 {
     error EscrowAlreadyValidated();
     error ZeroAmount();
     error TransferFailed();
+    error NoResolver();
+    error EscrowInDispute();
+    error VerdictNotReady();
 
     // ============ Types ============
     enum EscrowStatus {
         Created,
         Validated,
         Released,
-        Refunded
+        Refunded,
+        Disputed
     }
 
     struct Escrow {
@@ -62,10 +70,12 @@ contract AgentEscrow is EIP712 {
     mapping(uint256 => Escrow) public escrows;
     mapping(address => uint256[]) public userEscrows;
     mapping(bytes32 => bool) public usedSignatures;
-    
+    mapping(uint256 => uint256) public escrowDisputeId; // escrowId => resolver disputeId
+
     address public owner;
     address public aiValidator;
     IERC20 public usdc;
+    IResolver public resolver;
 
     // ============ Modifiers ============
     modifier onlyOwner() {
@@ -81,11 +91,15 @@ contract AgentEscrow is EIP712 {
     // ============ Constructor ============
     constructor(
         address _aiValidator,
-        address _usdc
+        address _usdc,
+        address _resolver
     ) EIP712("AgentEscrow", "1") {
         owner = msg.sender;
         aiValidator = _aiValidator;
         usdc = IERC20(_usdc);
+        if (_resolver != address(0)) {
+            resolver = IResolver(_resolver);
+        }
     }
 
     // ============ Core Functions ============
@@ -195,6 +209,7 @@ contract AgentEscrow is EIP712 {
         Escrow storage escrow = escrows[_escrowId];
         
         if (escrow.id == 0) revert EscrowNotFound();
+        if (escrow.status == EscrowStatus.Disputed) revert EscrowInDispute();
         if (escrow.status != EscrowStatus.Validated) revert ValidationRequired();
         if (msg.sender != escrow.buyer && msg.sender != owner) revert NotAuthorized();
         
@@ -215,6 +230,7 @@ contract AgentEscrow is EIP712 {
         Escrow storage escrow = escrows[_escrowId];
         
         if (escrow.id == 0) revert EscrowNotFound();
+        if (escrow.status == EscrowStatus.Disputed) revert EscrowInDispute();
         if (escrow.status == EscrowStatus.Released) revert EscrowAlreadyCompleted();
         
         escrow.status = EscrowStatus.Refunded;
@@ -227,6 +243,77 @@ contract AgentEscrow is EIP712 {
     }
 
     // ============ View Functions ============
+
+    /**
+     * @notice Open a dispute via the resolver
+     * @param _escrowId ID of the escrow to dispute
+     * @param _reason Human-readable reason (stored in serviceDescription)
+     * @return disputeId The resolver's dispute ID
+     */
+    function openDispute(uint256 _escrowId, string calldata _reason)
+        external
+        returns (uint256 disputeId)
+    {
+        if (address(resolver) == address(0)) revert NoResolver();
+
+        Escrow storage escrow = escrows[_escrowId];
+        if (escrow.id == 0) revert EscrowNotFound();
+        if (escrow.status == EscrowStatus.Released || escrow.status == EscrowStatus.Refunded) {
+            revert EscrowAlreadyCompleted();
+        }
+
+        // Only buyer or seller can open a dispute
+        if (msg.sender != escrow.buyer && msg.sender != escrow.seller) {
+            revert NotAuthorized();
+        }
+
+        disputeId = resolver.fileDispute(IResolver.DisputeContext({
+            escrowId: _escrowId,
+            buyer: escrow.buyer,
+            seller: escrow.seller,
+            token: address(usdc),
+            amount: escrow.amount,
+            serviceDescription: _reason,
+            metadata: ""
+        }));
+
+        escrow.status = EscrowStatus.Disputed;
+        escrowDisputeId[_escrowId] = disputeId;
+
+        emit DisputeOpened(_escrowId, disputeId);
+    }
+
+    /**
+     * @notice Execute a resolved dispute — distribute funds per verdict
+     * @param _escrowId ID of the escrow in dispute
+     */
+    function resolveDispute(uint256 _escrowId) external {
+        Escrow storage escrow = escrows[_escrowId];
+        if (escrow.id == 0) revert EscrowNotFound();
+        if (escrow.status != EscrowStatus.Disputed) revert NotAuthorized();
+
+        uint256 disputeId = escrowDisputeId[_escrowId];
+        if (!resolver.isReady(disputeId)) revert VerdictNotReady();
+
+        (uint256 buyerPayout, uint256 sellerPayout) = resolver.executeVerdict(disputeId);
+
+        if (buyerPayout > 0) {
+            bool success = usdc.transfer(escrow.buyer, buyerPayout);
+            if (!success) revert TransferFailed();
+        }
+        if (sellerPayout > 0) {
+            bool success = usdc.transfer(escrow.seller, sellerPayout);
+            if (!success) revert TransferFailed();
+        }
+
+        if (buyerPayout > 0) {
+            escrow.status = EscrowStatus.Refunded;
+        } else {
+            escrow.status = EscrowStatus.Released;
+        }
+
+        emit DisputeExecuted(_escrowId, buyerPayout, sellerPayout);
+    }
 
     /**
      * @notice Get escrow details
