@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {AgentEscrow} from "./AgentEscrow.sol";
+import {IAdjudicationOracle} from "./interfaces/IAdjudicationOracle.sol";
 
 /**
  * @title DisputeResolver
@@ -47,6 +48,8 @@ contract DisputeResolver is EIP712, ReentrancyGuard, Ownable {
     event ArbitratorAdded(address indexed arbitrator);
     event ArbitratorRemoved(address indexed arbitrator);
     event DisputeWindowUpdated(uint256 oldWindow, uint256 newWindow);
+    event OracleAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+    event OracleAdjudicationRequested(uint256 indexed disputeId, uint256 indexed oracleRequestId);
 
     // ============ Errors ============
     error DisputeNotFound();
@@ -62,6 +65,10 @@ contract DisputeResolver is EIP712, ReentrancyGuard, Ownable {
     error TransferFailed();
     error InvalidAddress();
     error ZeroAmount();
+    error OracleNotSet();
+    error OracleAlreadyRequested();
+    error OracleRequestFailed();
+    error DisputeNotOptedIntoOracle();
 
     // ============ Types ============
     enum Resolution {
@@ -113,6 +120,10 @@ contract DisputeResolver is EIP712, ReentrancyGuard, Ownable {
 
     uint256 public evidenceWindow; // seconds to submit evidence before resolution allowed
     uint256 public disputeDeadline; // seconds after opening before auto-resolve eligible
+
+    // ============ Oracle State ============
+    IAdjudicationOracle public oracleAdapter; // GenLayer or other oracle
+    mapping(uint256 => bool) public oracleRequested; // disputeId => oracle requested
 
     // ============ Constructor ============
     constructor(
@@ -322,6 +333,90 @@ contract DisputeResolver is EIP712, ReentrancyGuard, Ownable {
         return disputeEvidence[_disputeId].length;
     }
 
+    // ============ Oracle Functions ============
+
+    /**
+     * @notice Request AI adjudication from the oracle adapter (GenLayer, etc.)
+     * @dev Either party can opt-in. Pulls evidence from the dispute and submits
+     *      to the oracle. The oracle emits an event for offchain relayer pickup.
+     * @param _disputeId Dispute to request oracle adjudication for
+     * @return oracleRequestId The oracle's request ID
+     */
+    function requestOracleAdjudication(
+        uint256 _disputeId
+    ) external onlyParty(_disputeId) returns (uint256 oracleRequestId) {
+        if (address(oracleAdapter) == address(0)) revert OracleNotSet();
+        if (oracleRequested[_disputeId]) revert OracleAlreadyRequested();
+
+        Dispute storage d = disputes[_disputeId];
+        if (d.status != DisputeStatus.Open) revert DisputeAlreadyResolved();
+
+        // Pull evidence into string array
+        Evidence[] storage evidence = disputeEvidence[_disputeId];
+        string[] memory evidenceStrings = new string[](evidence.length);
+        for (uint256 i = 0; i < evidence.length; i++) {
+            evidenceStrings[i] = evidence[i].content;
+        }
+
+        oracleRequested[_disputeId] = true;
+
+        // Forward to oracle adapter
+        oracleRequestId = oracleAdapter.requestAdjudication(
+            _disputeId,
+            address(escrowContract),
+            d.escrowId,
+            d.buyer,
+            d.seller,
+            d.amount,
+            d.reason,
+            evidenceStrings
+        );
+
+        emit OracleAdjudicationRequested(_disputeId, oracleRequestId);
+    }
+
+    /**
+     * @notice Resolve a dispute using the oracle's verdict
+     * @dev Only callable by the oracle adapter itself (or owner as fallback).
+     *      Maps oracle Verdict enum to our Resolution enum.
+     * @param _disputeId Dispute to resolve
+     * @param _verdict Oracle's verdict
+     * @param _reasoning Oracle's reasoning
+     */
+    function resolveDisputeFromOracle(
+        uint256 _disputeId,
+        IAdjudicationOracle.Verdict _verdict,
+        string calldata _reasoning
+    ) external {
+        // Only the oracle adapter or owner can call this
+        if (msg.sender != address(oracleAdapter) && msg.sender != owner()) {
+            revert NotAuthorized();
+        }
+
+        Dispute storage d = disputes[_disputeId];
+        if (d.id == 0) revert DisputeNotFound();
+        if (d.status != DisputeStatus.Open) revert DisputeAlreadyResolved();
+        if (!oracleRequested[_disputeId]) revert DisputeNotOptedIntoOracle();
+
+        // Map oracle verdict to our Resolution enum
+        Resolution resolution;
+        if (_verdict == IAdjudicationOracle.Verdict.BuyerWins) {
+            resolution = Resolution.BuyerWins;
+        } else if (_verdict == IAdjudicationOracle.Verdict.SellerWins) {
+            resolution = Resolution.SellerWins;
+        } else {
+            resolution = Resolution.Split;
+        }
+
+        d.resolution = resolution;
+        d.status = DisputeStatus.Resolved;
+        d.resolvedBy = msg.sender;
+        d.reasoning = _reasoning;
+        d.resolvedAt = block.timestamp;
+
+        emit DisputeResolved(_disputeId, msg.sender, resolution, _reasoning);
+    }
+
     // ============ Admin ============
 
     function addArbitrator(address _arbitrator) external onlyOwner {
@@ -343,5 +438,11 @@ contract DisputeResolver is EIP712, ReentrancyGuard, Ownable {
 
     function setDisputeDeadline(uint256 _deadline) external onlyOwner {
         disputeDeadline = _deadline;
+    }
+
+    function setOracleAdapter(address _oracleAdapter) external onlyOwner {
+        address old = address(oracleAdapter);
+        oracleAdapter = IAdjudicationOracle(_oracleAdapter);
+        emit OracleAdapterUpdated(old, _oracleAdapter);
     }
 }

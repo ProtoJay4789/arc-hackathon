@@ -5,6 +5,7 @@ import "forge-std/Script.sol";
 import "../src/AgentEscrow.sol";
 import "../src/X402PaymentHandler.sol";
 import "../src/DisputeResolver.sol";
+import "../src/GenLayerOracle.sol";
 
 /**
  * @title Deploy Full Stack to Arc Testnet
@@ -51,6 +52,15 @@ contract DeployArcHackathon is Script {
             disputeDeadline
         );
 
+        // 4. Deploy GenLayerOracle (AI dispute adapter)
+        GenLayerOracle genLayerOracle = new GenLayerOracle(
+            address(disputeResolver),
+            address(0) // GenLayer gateway TBD
+        );
+
+        // Wire oracle into resolver
+        disputeResolver.setOracleAdapter(address(genLayerOracle));
+
         vm.stopBroadcast();
 
         // === Deployment Summary ===
@@ -61,6 +71,7 @@ contract DeployArcHackathon is Script {
         console.log("AgentEscrow:        ", address(escrow));
         console.log("X402PaymentHandler: ", address(paymentHandler));
         console.log("DisputeResolver:    ", address(disputeResolver));
+        console.log("GenLayerOracle:     ", address(genLayerOracle));
         console.log("");
         console.log("--- Configuration ---");
         console.log("USDC:               ", usdcAddress);
