@@ -32,3 +32,5 @@ coverage/
 
 # Broadcast
 broadcast/
+lib/
+*.sol.orig
